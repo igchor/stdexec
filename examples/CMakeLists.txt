@@ -30,6 +30,7 @@ function(def_example example)
     add_executable(${target} ${source})
     target_link_libraries(${target}
         PRIVATE STDEXEC::stdexec
+                dml
                 stdexec_executable_flags)
 endfunction()
 
@@ -44,13 +45,9 @@ set(stdexec_examples
     "example.server_theme.on_transfer : server_theme/on_transfer.cpp"
       "example.server_theme.then_upon : server_theme/then_upon.cpp"
      "example.server_theme.split_bulk : server_theme/split_bulk.cpp"
+     "example.io_uring : io_uring.cpp"
+     "example.dml : dml.cpp"
 )
-
-if (LINUX)
-  set(stdexect_examples ${stdexec_examples}
-                    "example.io_uring : io_uring.cpp"
-  )
-endif (LINUX)
 
 foreach(example ${stdexec_examples})
     def_example(${example})
