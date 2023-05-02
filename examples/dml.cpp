@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+// Use a thread pool
+#include "exec/static_thread_pool.hpp"
+
 #include "exec/dml_context.hpp"
 
 #include "exec/when_any.hpp"
@@ -51,13 +54,12 @@ struct my_sender {
   }
 };
 
+
 int main() {
   polling_context context;
   std::thread dml_thread{[&] {
     context.run();
   }};
-
-  auto scheduler = context.get_scheduler();
 
   std::vector<uint8_t> src1(8, 0);
   std::vector<uint8_t> src2(8, 1);
@@ -65,14 +67,26 @@ int main() {
   std::vector<uint8_t> dst1(8);
   std::vector<uint8_t> dst2(8);
 
-  stdexec::sync_wait(
-    stdexec::when_all(
-        polling_context::async_memcpy(scheduler, src1.data(), dst1.data(), 8),
-        polling_context::async_memcpy(scheduler, src2.data(), dst2.data(), 8))
-    | stdexec::then([&]{std::cout << "Src and dst buffers " << (src1 == dst1 && src2 == dst2);}));
+  exec::static_thread_pool work_pool{8};
+  auto work_sched = work_pool.get_scheduler();
 
-  stdexec::sync_wait(polling_context::async_memcpy(scheduler, src1.data(), dst1.data(), 8));
-  //stdexec::sync_wait(my_sender{});
+  auto just_cout = stdexec::just() | stdexec::then([&]{std::cout << "then tid: " << std::this_thread::get_id() << std::endl; return 1;});
+
+  // stdexec::sync_wait(
+  //   stdexec::when_all(
+  //       stdexec::on(work_sched, just_cout) | stdexec::let_value([&](int a){std::cout << a << " let value: " << std::this_thread::get_id() << std::endl; return stdexec::just();}),
+  //       polling_context::async_memcpy(context, src1.data(), dst1.data(), 8) | stdexec::let_value([&](auto...){std::cout << " let value after memcpy: " << std::this_thread::get_id() << std::endl; return stdexec::just();}),
+  //       polling_context::async_memcpy(context, src2.data(), dst2.data(), 8))
+  //   | stdexec::then([&]{std::cout << "Src and dst buffers " << (src1 == dst1 && src2 == dst2) << " . tid: " << std::this_thread::get_id() << std::endl;}));
+
+   stdexec::sync_wait(
+    stdexec::when_all(
+        polling_context::async_memcpy(context, src1.data(), dst1.data(), 8),
+        polling_context::async_memcpy(context, src2.data(), dst2.data(), 8))
+    | stdexec::then([&]{std::cout << "Src and dst buffers " << (src1 == dst1 && src2 == dst2) << " . tid: " << std::this_thread::get_id() << std::endl;}));
+
+  // stdexec::sync_wait(polling_context::async_memcpy(context, src1.data(), dst1.data(), 8));
+  // stdexec::sync_wait(my_sender{});
 
   context.finish();
   dml_thread.join();
