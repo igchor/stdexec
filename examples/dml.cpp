@@ -1,19 +1,3 @@
-/*
- * Copyright (c) 2023 Intel Corporation
- *
- * Licensed under the Apache License Version 2.0 with LLVM Exceptions
- * (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
- *
- *   https://llvm.org/LICENSE.txt
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 // Use a thread pool
 #include "exec/static_thread_pool.hpp"
 
@@ -21,45 +5,84 @@
 
 #include "exec/when_any.hpp"
 #include "exec/finally.hpp"
-
 #include "stdexec/execution.hpp"
-
 #include <thread>
-
 #include <iostream>
 
+// auto cachelib_use_case1() {
+//   auto get_ptr = []{
+//     std::cout << "get_ptr" << std::endl;
+//     return std::pair<void*> {
+//       (void*) 0x1234,
+//       (void*) 0x1234
+//     };
+//   };
 
-template <typename R>
-struct my_op :stdexec::__immovable {
-  R r;
+//   auto finish = [](void *old_ptr){
+//     // cleanup after ptr
+//     std::cout << "cleanup: " << old_ptr << std::endl;
+//   };
 
-  explicit my_op(R&& r): r((R&&) r) {}
+//   auto async_memcpy = [](std::pair<void*> ptrs) {
+//     std::cout << "mempcy: " << ptrs.first << " " << ptrs.second << std::endl;
+//     return stdexec::just(ptrs.second);
+//   };
 
-  friend void tag_invoke(stdexec::start_t, my_op &self) noexcept {
-    stdexec::set_value((R&&) self.r);
-  }
-};
+//   auto get_ptr_sender = stdexec::then(stdexec::just(), get_ptr);
+//   auto memcpy_sender = stdexec::let_value(get_ptr_sender, async_memcpy);
+//   auto complete_sender = stdexec::then(memcpy_sender, finish);
 
-struct my_sender {
-  void *ptr;
-  void *sss;
-  
-  template <typename Env>
-  friend auto tag_invoke(stdexec::get_completion_signatures_t, my_sender&&, Env)
-   noexcept -> stdexec::completion_signatures<stdexec::set_value_t()>;
+//   return stdexec::when_all(
+//     complete_sender,
+//     complete_sender,
+//     complete_sender
+//   );
+// }
 
-  template <typename Receiver>
-  friend my_op<Receiver> tag_invoke(stdexec::connect_t, my_sender self, Receiver &&r) noexcept {
-    return my_op<Receiver>((Receiver&&)(r));
-  }
-};
+// auto cachelib_use_case2() {
+//   auto get_ptrs = []{
+//     std::cout << "get_ptr" << std::endl;
+//     return std::pair<std::vector<void*>, std::vector<void*>> {
+//        {(void*) 0x1234, (void*) 0x1234, (void*) 0x1234, (void*) 0x1234},
+//        {(void*) 0x1234, (void*) 0x1234, (void*) 0x1234, (void*) 0x1234}
+//     };
+//   };
+
+//   auto finish = [](){ // todo, use whan_all_variant or something to pass values
+//     // cleanup after ptr
+//     std::cout << "cleanup: " << std::endl;
+//   };
+
+//   auto async_memcpy = [](std::pair<std::vector<void*>, std::vector<void*>> ptrs) {
+//     auto async_memcpy_sender_f = [](void *ptr, void *new_ptr) {
+//       return stdexec::just(); // TODO, return actual sender
+//     };
+
+//     return stdexec::when_all( // TODO, how to make it dynamic? Need another CPO for when_all -> size + range of senders? (or a generator/function that takes index to generate those senders?)
+//       async_memcpy_sender_f(ptrs.first[0], ptrs.second[0]),
+//       async_memcpy_sender_f(ptrs.first[1], ptrs.second[1])
+//     );
+//   };
+
+//   auto get_ptr_sender = stdexec::then(stdexec::just(), get_ptrs); // TODO or use BULK here
+//   auto memcpy_sender = stdexec::let_value(get_ptr_sender, async_memcpy_sender);
+//   auto complete_sender = stdexec::then(memcpy_sender, finish); // TODO or use BULK here
+
+//   return stdexec::when_all(
+//     complete_sender,
+//     complete_sender,
+//     complete_sender
+//   );
+// }
 
 
 int main() {
-  polling_context context;
+  dml_context context;
   std::thread dml_thread{[&] {
     context.run();
   }};
+
+  auto sched = context.get_scheduler();
 
   std::vector<uint8_t> src1(8, 0);
   std::vector<uint8_t> src2(8, 1);
@@ -67,26 +90,43 @@ int main() {
   std::vector<uint8_t> dst1(8);
   std::vector<uint8_t> dst2(8);
 
-  exec::static_thread_pool work_pool{8};
-  auto work_sched = work_pool.get_scheduler();
+  //  stdexec::sync_wait(
+  //   stdexec::when_all(
+  //       dml_context::async_memcpy(context, src1.data(), dst1.data(), 8) | stdexec::then([]{std::cout << "then" << std::endl;}) | stdexec::let_value([&](auto...) { return dml_context::async_memcpy(context, src1.data(), dst1.data(), 8); }),
+  //       dml_context::async_memcpy(context, src2.data(), dst2.data(), 8))
+  //   | stdexec::then([&]{std::cout << "Src and dst buffers " << (src1 == dst1 && src2 == dst2) << " . tid: " << std::this_thread::get_id() << std::endl;}));
 
-  auto just_cout = stdexec::just() | stdexec::then([&]{std::cout << "then tid: " << std::this_thread::get_id() << std::endl; return 1;});
+  // auto snd = stdexec::when_all(
+  //       stdexec::on(sched, dml_context::async_memcpy(context, src1.data(), dst1.data(), 8)),
+  //       stdexec::on(sched, dml_context::async_memcpy(context, src2.data(), dst2.data(), 8))
+  //   );
+
+  // exec::static_thread_pool p;
+  // auto schsed = p.get_scheduler();
+
+  stdexec::sync_wait(
+    stdexec::on(sched, dml_context::async_memcpy_dynamic(src1.data(), dst1.data(), 8))
+  );
+
+  // stdexec::sync_wait(
+  //   stdexec::on(sched, dml_context::async_memcpy_dynamic(src1.data(), dst1.data(), 8))
+  // );
 
   // stdexec::sync_wait(
   //   stdexec::when_all(
-  //       stdexec::on(work_sched, just_cout) | stdexec::let_value([&](int a){std::cout << a << " let value: " << std::this_thread::get_id() << std::endl; return stdexec::just();}),
-  //       polling_context::async_memcpy(context, src1.data(), dst1.data(), 8) | stdexec::let_value([&](auto...){std::cout << " let value after memcpy: " << std::this_thread::get_id() << std::endl; return stdexec::just();}),
-  //       polling_context::async_memcpy(context, src2.data(), dst2.data(), 8))
-  //   | stdexec::then([&]{std::cout << "Src and dst buffers " << (src1 == dst1 && src2 == dst2) << " . tid: " << std::this_thread::get_id() << std::endl;}));
+  //     stdexec::on(sched, dml_context::async_memcpy_dynamic(src1.data(), dst1.data(), 8)),
+  //     stdexec::on(sched, dml_context::async_memcpy_dynamic(src2.data(), dst2.data(), 8))
+  // ));
 
-   stdexec::sync_wait(
-    stdexec::when_all(
-        polling_context::async_memcpy(context, src1.data(), dst1.data(), 8),
-        polling_context::async_memcpy(context, src2.data(), dst2.data(), 8))
-    | stdexec::then([&]{std::cout << "Src and dst buffers " << (src1 == dst1 && src2 == dst2) << " . tid: " << std::this_thread::get_id() << std::endl;}));
+  // using Sender = dml_context::memory_operation_sender<std::tuple<dml::mem_move_operation, dml::data_view, dml::data_view> >;
+  // using Receiver = stdexec::__on::__receiver_ref<stdexec::_Yp<dml_context::dml_scheduler>, stdexec::_Yp<dml_context::memory_operation_sender<std::tuple<dml::mem_move_operation, dml::data_view, dml::data_view> > >, stdexec::_Yp<stdexec::__compl_sigs::__env_promise<stdexec::__sync_wait::__env> > >::__t;
 
-  // stdexec::sync_wait(polling_context::async_memcpy(context, src1.data(), dst1.data(), 8));
-  // stdexec::sync_wait(my_sender{});
+  //static_assert(stdexec::__connect::__connectable_with_tag_invoke<S1, R1>);
+
+
+  // stdexec::sync_wait(
+  //   snd  
+  // );
 
   context.finish();
   dml_thread.join();

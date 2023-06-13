@@ -11,66 +11,42 @@
 
 #include <cstring>
 
-// dynamic operation batch
-  // TODO: also make static one?
-  // TODO: create base class for non-dml usages?
-  // struct batch_t {
-  //   batch_t(task_queue queue): sequence(queue.) {}
+struct dml_context;
 
-  //   decltype(dml::sequence(0, std::allocator<dml::byte_t>{})) sequence;
-  //   batch_t* next{nullptr};
 
-  //   template <typename Descriptor>
-  //   void add(task* op, Descriptor desc) {
-  //     completion.push_back(op);
-  //     //ops.push_back({src, dst, size});
-  //     auto status = sequence.add(dml::mem_move, dml::make_view(src, size), dml::make_view(dst, size));
+// TODO: this is problematic: no way of implementing get_completion_scheduler if we inject the scheduler dynamically???
+template <class S>
+concept dml_sender = 
+  // stdexec::sender<S> &&            
+  requires(const S& sndr) {
+    {
+      stdexec::get_completion_scheduler<stdexec::set_value_t>(stdexec::get_env(sndr))
+            .context
+    } -> stdexec::__decays_to<dml_context>;
+  };
 
-  //     if (status != dml::status_code::ok)
-  //       throw std::runtime_error("Sequence::add failed");
-  //   }
-
-  //   void submit() {
-  //     // for (auto [src, dst, size] : ops) {
-  //     //   memcpy(src, dst, size);
-  //     // }
-  //     // handler = dml::submit<dml::software>(dml::batch, sequence);
-  //     if (!handler.valid()) {
-  //       std::cout << (int) handler.get().status << std::endl;
-  //       throw std::runtime_error("handler invalid");
-  //     }
-  //   }
-
-  //   bool is_ready() {
-  //     //return true;
-  //     return handler.is_finished();
-  //   }
-
-  //   void complete() {
-  //     // TODO: check for errors...
-  //     assert(is_ready());
-  //     while (!completion.empty()) {
-  //       completion.pop_front()->complete();
-  //     }
-  //   }
-  // };
-
-  // // TODO: use some kind of a ringbuffer? size based onmax possible hardware (DSA) capability
-  // std::list<batch_t> batches;
+  
+template <class R>
+concept receiver_with_dml_env = //
+  // stdexec::receiver<R> &&          //
+  requires(const R& rcvr) {
+    {
+      stdexec::get_scheduler(stdexec::get_env(rcvr)).context
+    } -> stdexec::__decays_to<dml_context*>;
+  };
 
 template <typename Desc>
 concept DmlDescriptor = requires(Desc desc) {
   std::apply([](auto... params){return dml::submit<dml::automatic>(params...);}, desc);
 };
 
-template <typename Sender>
-concept dmlSender = requires(Sender sender) {
-  sender.desc;
-};
+  template <DmlDescriptor Desc>
+  auto submit_dml(Desc &&desc) {
+    return std::apply([](auto... params){return dml::submit<dml::automatic>(params...);}, std::forward<Desc>(desc));
+  }
 
-struct polling_context {
+struct dml_context {
 //private:
-  struct batch_t;
 
   struct task : stdexec::__immovable {
       task* next{nullptr};
@@ -88,53 +64,139 @@ struct polling_context {
 
   std::atomic<bool> finishing;
 
-  // template <typename Receiver>
-  // struct schedule_operation : task {
-  //   Receiver rec;
-  //   polling_context &ctx;
+  //////////////////////////// SCHDULER
+  struct dml_scheduler {
+    // template <stdexec::sender S>
+    // friend auto tag_invoke(stdexec::sync_wait_t, const stream_scheduler& self, S&& sndr) {
+    //   return sync_wait::sync_wait_t{}(self.context_state_, (S&&) sndr);
+    // }
 
-  //   schedule_operation(Receiver rec, polling_context &ctx): rec(rec), ctx(ctx) {}
+    // friend stdexec::forward_progress_guarantee
+    //   tag_invoke(stdexec::get_forward_progress_guarantee_t, const stream_scheduler&) noexcept {
+    //   return stdexec::forward_progress_guarantee::weakly_parallel;
+    // }
 
-  //   void complete() override {
-  //     std::cout << "schedule_operation complete " << std::this_thread::get_id() << std::endl;
-  //     stdexec::set_value((Receiver&&) rec);
-  //   }
+    dml_scheduler(dml_context *context)
+      :context(context) {
+    }
 
-  //   friend void tag_invoke(stdexec::start_t, schedule_operation &self) noexcept {
-  //     self.ctx.ready.push_front(&self);
-  //   }
-  // };
+    // private: TODO
+    dml_context* context;
 
-  // struct schedule_sender {
-  //   using is_sender = void;
+    friend dml_context;
 
-  //   template <typename Env>
-  //   friend auto tag_invoke(stdexec::get_completion_signatures_t, schedule_sender&&, Env)
-  //     noexcept -> stdexec::completion_signatures<stdexec::set_value_t()>;
+    template <class Receiver>
+    struct operation_state : task {
+        Receiver receiver;
+        dml_context *context;
 
-  //   polling_context* ctx;
+        operation_state(Receiver&& receiver, dml_context* context)
+          : receiver((Receiver&&) receiver), context(context) {
+        }
 
-  //   template <typename Receiver>
-  //   friend schedule_operation<Receiver> tag_invoke(stdexec::connect_t, schedule_sender self, Receiver &&r) noexcept {
-  //     return schedule_operation<Receiver>((Receiver&&)(r), *self.ctx);
-  //   }
-  // };
+        friend void tag_invoke(stdexec::start_t, operation_state& op) noexcept {
+          op.context->pending.push_front(&op);
+        }
 
-  // struct scheduler {
-  //   polling_context* ctx;
-  //   friend schedule_sender tag_invoke(stdexec::schedule_t, const scheduler& self) noexcept {
-  //     return {self.ctx};
-  //   }
-  // };
+        void complete() override {
+          stdexec::set_value((Receiver&&) receiver);
+        }
 
-  // scheduler get_scheduler() noexcept {
-  //   return {this};
-  // }
+        bool is_done() override {
+          return true;
+        }
+    };
+
+    struct env {
+      dml_context* context;
+
+      dml_scheduler make_scheduler() const {
+        return dml_scheduler{context};
+      }
+
+      template <class CPO>
+      friend dml_scheduler
+        tag_invoke(stdexec::get_completion_scheduler_t<CPO>, const env& self) noexcept {
+        return self.make_scheduler();
+      }
+    };
+
+    // template <typename R>
+    // struct receiver {
+    //     friend void tag_invoke(stdexec::set_value_t, receiver&& self) noexcept
+    //     {
+
+    //     }
+
+    //     friend void tag_invoke(stdexec::set_error_t tag, receiver &&self) noexcept
+    //     {
+          
+    //     }
+    // };
+
+    struct sender {
+      using is_sender = void;
+
+      using completion_signatures = stdexec::
+        completion_signatures< stdexec::set_value_t(), stdexec::set_stopped_t() /*, stdexec::set_error_t(std::exception_ptr) */>;
+
+      template <typename Env>
+      friend auto tag_invoke(stdexec::get_completion_signatures_t, sender&&, Env)
+        noexcept -> completion_signatures;
+
+      template <class R>
+      friend auto tag_invoke(stdexec::connect_t, const sender& self, R&& rec) //
+        noexcept(std::is_nothrow_constructible_v<std::remove_cvref_t<R>, R>) {
+        return operation_state(
+          (R&&) rec, self.env_.context);
+      }
+
+      friend const env& tag_invoke(stdexec::get_env_t, const sender& self) noexcept {
+        return self.env_;
+      };
+
+        inline sender(dml_context* context) noexcept
+        : env_{context} {
+      }
+
+      env env_;
+    };
+
+    friend inline sender
+      tag_invoke(stdexec::schedule_t, const dml_scheduler& self) noexcept {
+      return {self.context};
+    }
+
+      bool operator==(const dml_scheduler& other) const noexcept {
+        // TODO: come up with something better
+        return context == other.context;
+      }
+  };
+
+  auto get_scheduler() {
+    return dml_scheduler{this};
+  }
+  //////////////////////////////////////
+
+    struct env {
+      dml_context* context;
+
+      dml_scheduler make_scheduler() const {
+        return dml_scheduler{context};
+      }
+
+      template <class CPO>
+      friend dml_scheduler
+        tag_invoke(stdexec::get_completion_scheduler_t<CPO>, const env& self) noexcept {
+        return self.make_scheduler();
+      }
+    };
 
   template <typename Receiver, DmlDescriptor Descriptor>
   struct dml_operation : task {
-    dml_operation(Receiver rec, polling_context *ctx, Descriptor desc):
-      rec(rec), ctx(ctx), desc(desc) {}
+    dml_operation(Receiver rec, dml_context *context, Descriptor desc):
+      rec(rec), context(context), desc(desc) {
+      }
 
     void complete() override {
       // TODO: add return value + error checking ...
@@ -146,47 +208,72 @@ struct polling_context {
     }
 
     friend void tag_invoke(stdexec::start_t, dml_operation &self) noexcept {
-      std::cout << "NORMAL" << std::endl;
-      self.handle = std::apply([](auto... params){return dml::submit<dml::automatic>(params...);}, self.desc);
-      self.ctx->started.push_front(&self);
+      self.handle = submit_dml(self.desc);
+      self.context->started.push_front(&self);
     }
 
     private:
       Receiver rec;
-      polling_context *ctx;
+      dml_context *context;
       Descriptor desc;
-      decltype(std::apply([](auto... params){return dml::submit<dml::automatic>(params...);}, std::declval<Descriptor>())) handle;
+      decltype(submit_dml(std::declval<Descriptor>())) handle;
   };
 
-  template <typename Descriptor>
+  template <DmlDescriptor Descriptor>
   struct memory_operation_sender {
     using is_sender = void;
+
+    // friend const env& tag_invoke(stdexec::get_env_t, const memory_operation_sender& self) noexcept {
+    //   return self.env_;
+    // };
     
-    memory_operation_sender(polling_context* ctx, Descriptor desc): ctx(ctx), desc(desc) {}
+    memory_operation_sender(dml_context* context, Descriptor desc): context(context), desc(desc), env_(context) {}
 
     template <typename Env>
     friend auto tag_invoke(stdexec::get_completion_signatures_t, memory_operation_sender&&, Env)
-      noexcept -> stdexec::completion_signatures<stdexec::set_value_t()>;
+      noexcept -> stdexec::completion_signatures<stdexec::set_value_t(), stdexec::set_stopped_t()>;
 
     template <typename Receiver>
     friend dml_operation<Receiver, Descriptor> tag_invoke(stdexec::connect_t, memory_operation_sender self, Receiver &&r) noexcept {
-      return dml_operation<Receiver, Descriptor>((Receiver&&)(r), self.ctx, self.desc);
+      assert(self.context); // TODO this should be compile-time
+      return dml_operation<Receiver, Descriptor>((Receiver&&)(r), self.context, self.desc);
     }
 
-    polling_context* ctx;
+    dml_context* context;
+    Descriptor desc;
+    env env_;
+  };
+
+  template <DmlDescriptor Descriptor>
+  struct memory_operation_dynamic_sender {
+    using is_sender = void;
+    
+    memory_operation_dynamic_sender(Descriptor desc): desc(desc) {}
+
+    template <typename Env>
+    friend auto tag_invoke(stdexec::get_completion_signatures_t, memory_operation_dynamic_sender&&, Env)
+      noexcept -> stdexec::completion_signatures<stdexec::set_value_t(), stdexec::set_stopped_t()>;
+
+    template <receiver_with_dml_env Receiver>
+    friend dml_operation<Receiver, Descriptor> tag_invoke(stdexec::connect_t, memory_operation_dynamic_sender self, Receiver &&r) noexcept {
+      return dml_operation<Receiver, Descriptor>((Receiver&&)(r), stdexec::get_scheduler(stdexec::get_env(r)).context, self.desc);
+    }
+
     Descriptor desc;
   };
 
-  // TODO: async_memcpy should be a CPO?
-  // Get rid of ctx -> get it from sender->get_completion_scheduler?
-  static auto async_memcpy(polling_context &ctx, void *src, void* dst, size_t size) noexcept {
-    return memory_operation_sender(&ctx, std::make_tuple(dml::mem_move, dml::make_view(src, size), dml::make_view(dst, size)));
+  static auto async_memcpy(dml_context &context, void *src, void* dst, size_t size) noexcept {
+    return memory_operation_sender(&context, std::make_tuple(dml::mem_move, dml::make_view(src, size), dml::make_view(dst, size)));
+  }
+
+  static auto async_memcpy_dynamic(void *src, void* dst, size_t size) noexcept {
+    return memory_operation_dynamic_sender(std::make_tuple(dml::mem_move, dml::make_view(src, size), dml::make_view(dst, size)));
   }
 
   template <typename Receiver, DmlDescriptor... Descriptors>
   struct when_all_dml_operation : task {
-    when_all_dml_operation(Receiver rec, polling_context *ctx, std::tuple<Descriptors...> descriptors):
-      rec(rec), ctx(ctx), descriptors(descriptors) {}
+    when_all_dml_operation(Receiver rec, dml_context *context, std::tuple<Descriptors...> descriptors):
+      rec(rec), context(context), descriptors(descriptors) {}
 
     void complete() override {
       // TODO: add return value + error checking ...
@@ -198,19 +285,18 @@ struct polling_context {
     }
 
     friend void tag_invoke(stdexec::start_t, when_all_dml_operation &self) noexcept {
-      std::cout << "WHEN ALL" << std::endl;
       auto sequence = dml::sequence(sizeof...(Descriptors), std::allocator<dml::byte_t>{});
 
       auto add_to_sequence = [&sequence](auto desc){ std::apply([&sequence](auto... params){sequence.add(params...);}, desc); };
       std::apply([&add_to_sequence](auto&... desc){(..., add_to_sequence(desc));}, self.descriptors);
 
       self.handle = dml::submit<dml::automatic, std::allocator<dml::byte_t>>(dml::batch, sequence);
-      self.ctx->started.push_front(&self);
+      self.context->started.push_front(&self);
     }
 
     private:
       Receiver rec;
-      polling_context *ctx;
+      dml_context *context;
       std::tuple<Descriptors...> descriptors;
       dml::handler<dml::batch_operation, std::allocator<dml::byte_t>> handle;
   };
@@ -218,8 +304,12 @@ struct polling_context {
   template <DmlDescriptor... Descriptors>
   struct when_all_sender {
     using is_sender = void;
+
+    friend const env& tag_invoke(stdexec::get_env_t, const when_all_sender& self) noexcept {
+      return self.env_;
+    };
     
-    when_all_sender(polling_context* ctx, std::tuple<Descriptors...> desc): ctx(ctx), desc(desc) {}
+    when_all_sender(dml_context* context, std::tuple<Descriptors...> desc): context(context), desc(desc), env_(context) {}
 
     template <typename Env>
     friend auto tag_invoke(stdexec::get_completion_signatures_t, when_all_sender&&, Env)
@@ -227,28 +317,26 @@ struct polling_context {
 
     template <typename Receiver>
     friend when_all_dml_operation<Receiver, Descriptors...> tag_invoke(stdexec::connect_t, when_all_sender self, Receiver &&r) noexcept {
-      return when_all_dml_operation<Receiver, Descriptors...>((Receiver&&)(r), self.ctx, self.desc);
+      return when_all_dml_operation<Receiver, Descriptors...>((Receiver&&)(r), self.context, self.desc);
     }
 
   private:
-    polling_context* ctx;
+    dml_context* context;
     std::tuple<Descriptors...> desc;
+    env env_;
   };
 
   template <typename... Senders>
-  requires dmlSender<std::common_type_t<Senders...>> // or implement fallback for others?
   friend auto tag_invoke(stdexec::when_all_t, Senders&&... senders) noexcept {
-    // isnt it too late to careate a batch here????
     auto get_descriptor = [](auto& sender) { return sender.desc; };
     auto descriptors = std::make_tuple(get_descriptor(senders)...);
 
     // TODO: this where get_env should be used?
     auto s = std::make_tuple(senders...);
-    auto ctx = std::get<0>(s).ctx;
+    auto context = std::get<0>(s).context;
 
-    return when_all_sender(ctx, descriptors);
+    return when_all_sender(context, descriptors);
   }
-
 
  std::pair<task_queue, task_queue> check_and_complete(task_queue &&pending) const {
     task_queue still_pending;

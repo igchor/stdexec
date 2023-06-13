@@ -36,6 +36,8 @@
 #include "coroutine.hpp"
 #include "stop_token.hpp"
 
+#include <iostream>
+
 #ifdef __EDG__
 #pragma diagnostic push
 #pragma diag_suppress 1302
@@ -2823,6 +2825,7 @@ namespace stdexec {
                    __copy_cvref_t<_Self, _Sender>,
                    _Receiver&&,
                    __copy_cvref_t<_Self, _Fun>>) -> __operation<_Self, _Receiver> {
+          std::cout << "then connect" << std::endl;
           return {((_Self&&) __self).__sndr_, (_Receiver&&) __rcvr, ((_Self&&) __self).__fun_};
         }
 
