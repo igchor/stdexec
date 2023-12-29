@@ -19,7 +19,7 @@
 
 struct RunThread {
   void operator()(
-    tbbexec::tbb_thread_pool& pool,
+    tbbexec::tbb_thread_pool& p,
     std::size_t total_scheds,
     std::size_t tid,
     std::barrier<>& barrier,
@@ -27,9 +27,13 @@ struct RunThread {
     std::span<char> buffer,
 #endif
     std::atomic<bool>& stop,
-    exec::numa_policy* numa) {
-    std::size_t numa_node = numa->thread_index_to_node(tid);
-    numa->bind_to_node(numa_node);
+    exec::numa_policy* numa,
+    size_t usWork) {
+    auto &pool = p;
+      std::size_t numa_node = numa->thread_index_to_node(tid);
+    //tbb::task_arena::constraints c(numa_node, p.available_parallelism());
+    //tbbexec::tbb_thread_pool pool(c);
+    // numa->bind_to_node(numa_node);
     auto scheduler = pool.get_scheduler();
     std::mutex mut;
     std::condition_variable cv;
@@ -44,6 +48,7 @@ struct RunThread {
       pmr::polymorphic_allocator<char> alloc(&resource);
       auto [start, end] = exec::even_share(total_scheds, tid, pool.available_parallelism());
       std::size_t scheds = end - start;
+      // std::cout << "sheds: " << scheds << " par: " << pool.available_parallelism() << std::endl;
       std::atomic<std::size_t> counter{scheds};
       auto env = exec::make_env(exec::with(stdexec::get_allocator, alloc));
       while (scheds) {
@@ -51,6 +56,7 @@ struct RunThread {
           stdexec::schedule(scheduler) //
             | stdexec::then([&] {
                 auto prev = counter.fetch_sub(1);
+                doWork(usWork);
                 if (prev == 1) {
                   std::lock_guard lock{mut};
                   cv.notify_one();
@@ -68,6 +74,7 @@ struct RunThread {
           stdexec::schedule(scheduler) //
           | stdexec::then([&] {
               auto prev = counter.fetch_sub(1);
+              doWork(usWork);
               if (prev == 1) {
                 std::lock_guard lock{mut};
                 cv.notify_one();

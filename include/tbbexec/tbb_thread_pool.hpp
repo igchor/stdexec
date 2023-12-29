@@ -18,6 +18,7 @@
 #pragma once
 
 #include <tbb/task_arena.h>
+#include <tbb/task_group.h>
 
 #include <exec/static_thread_pool.hpp>
 
@@ -463,14 +464,23 @@ namespace tbbexec {
    public:
     //! Constructor forwards to tbb::task_arena constructor:
     template <typename... Args>
-    explicit tbb_thread_pool(Args&&... args)
-      : arena_{std::forward<Args>(args)...} {
-      arena_.initialize();
+    explicit tbb_thread_pool(Args&&... args): p(args...), groups(new tbb::task_group[p])
+    //  : arena_{std::forward<Args>(args)...} 
+      {
+    //  arena_.initialize();
     }
 
     [[nodiscard]] std::uint32_t available_parallelism() const {
-      return arena_.max_concurrency();
+      //return arena_.max_concurrency();
+      return std::thread::hardware_concurrency();
     }
+
+    ~tbb_thread_pool() {
+      for (size_t i = 0; i < p; i++) {
+        groups[i].wait();
+      }
+    }
+
    private:
     [[nodiscard]] static constexpr stdexec::forward_progress_guarantee
       forward_progress_guarantee() {
@@ -483,10 +493,26 @@ namespace tbbexec {
     friend class operation;
 
     void enqueue(task_base* task, std::uint32_t tid = 0) noexcept {
-      arena_.enqueue([task, tid] { task->__execute(task, /*tid=*/tid); });
+      //tbb::this_task_arena::enqueue([task, tid] { task->__execute(task, /*tid=*/tid); });
+      g.run([task, tid] {
+         task->__execute(task, /*tid=*/tid); 
+       });
+      //arena_.enqueue([task, tid] { task->__execute(task, /*tid=*/tid); });
+
+      // groups[tbb::this_task_arena::current_thread_index()].run([task, tid] { task->__execute(task, /*tid=*/tid); });
+
+      // arena_.enqueue([task, tid, this] {
+      //    g.run([task, tid] {
+      //     task->__execute(task, /*tid=*/tid); 
+      //   });
+      // });
     }
 
-    tbb::task_arena arena_{tbb::task_arena::attach{}};
+    long p;
+    tbb::task_group* groups;
+
+    tbb::task_group g;
+    //tbb::task_arena arena_{tbb::task_arena::attach{}};
   };
 
   template <typename PoolType, typename ReceiverId>

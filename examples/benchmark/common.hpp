@@ -97,11 +97,24 @@ struct numa_deleter {
   }
 };
 
+static inline void doWork(size_t us = 1) {
+  std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+  while (std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count() < us);
+}
+
 template <class Pool, class RunThread>
 void my_main(int argc, char** argv, exec::numa_policy* policy = exec::get_numa_policy()) {
   int nthreads = std::thread::hardware_concurrency();
+  int benchThreads = 1;
   if (argc > 1) {
-    nthreads = std::atoi(argv[1]);
+    benchThreads = std::atoi(argv[1]);
+  }
+  if (argc > 2) {
+    nthreads = std::atoi(argv[2]);
+  }
+  size_t usWork = 1;
+  if (argc > 3) {
+    usWork = std::atoll(argv[3]);
   }
   std::size_t total_scheds = 10'000'000;
 #ifndef STDEXEC_NO_MONOTONIC_BUFFER_RESOURCE
@@ -113,17 +126,17 @@ void my_main(int argc, char** argv, exec::numa_policy* policy = exec::get_numa_p
   } else {
     pool.emplace(nthreads);
   }
-  std::barrier<> barrier(nthreads + 1);
+  std::barrier<> barrier(benchThreads + 1);
   std::vector<std::thread> threads;
   std::atomic<bool> stop{false};
 #ifndef STDEXEC_NO_MONOTONIC_BUFFER_RESOURCE
   std::size_t buffer_size = 2000 << 20;
-  for (std::size_t i = 0; i < static_cast<std::size_t>(nthreads); ++i) {
+  for (std::size_t i = 0; i < static_cast<std::size_t>(benchThreads); ++i) {
     exec::numa_allocator<char> alloc(policy->thread_index_to_node(i));
     buffers.push_back(std::unique_ptr<char, numa_deleter>{alloc.allocate(buffer_size), numa_deleter{buffer_size, alloc}});
   }
 #endif
-  for (std::size_t i = 0; i < static_cast<std::size_t>(nthreads); ++i) {
+  for (std::size_t i = 0; i < static_cast<std::size_t>(benchThreads); ++i) {
     threads.emplace_back(
       RunThread{},
       std::ref(*pool),
@@ -134,7 +147,8 @@ void my_main(int argc, char** argv, exec::numa_policy* policy = exec::get_numa_p
       std::span<char>{buffers[i].get(), buffer_size},
 #endif
       std::ref(stop),
-      policy);
+      policy,
+      usWork);
   }
   std::size_t nRuns = 100;
   std::size_t warmup = 1;

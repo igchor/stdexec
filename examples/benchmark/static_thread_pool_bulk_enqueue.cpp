@@ -31,7 +31,8 @@ struct RunThread {
     std::span<char> buffer,
 #endif
     std::atomic<bool>& stop,
-    exec::numa_policy* numa) {
+    exec::numa_policy* numa,
+    size_t usWork) {
     std::size_t numa_node = numa->thread_index_to_node(tid);
     numa->bind_to_node(numa_node);
     while (true) {

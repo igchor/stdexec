@@ -27,7 +27,8 @@ struct RunThread {
     std::span<char> buffer,
 #endif
     std::atomic<bool>& stop,
-    exec::numa_policy* numa) {
+    exec::numa_policy* numa,
+    size_t usWork) {
     std::size_t numa_node = numa->thread_index_to_node(tid);
     numa->bind_to_node(numa_node);
     exec::nodemask mask{};
@@ -53,6 +54,7 @@ struct RunThread {
           stdexec::schedule(scheduler) //
             | stdexec::then([&] {
                 auto prev = counter.fetch_sub(1);
+                doWork(usWork);
                 if (prev == 1) {
                   std::lock_guard lock{mut};
                   cv.notify_one();
@@ -70,6 +72,7 @@ struct RunThread {
           stdexec::schedule(scheduler) //
           | stdexec::then([&] {
               auto prev = counter.fetch_sub(1);
+              doWork(usWork);
               if (prev == 1) {
                 std::lock_guard lock{mut};
                 cv.notify_one();
